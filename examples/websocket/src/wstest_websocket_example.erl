@@ -5,7 +5,10 @@ start_link() -> start_link(3333).
 
 start_link(Port) ->
     misultin:start_link([
-            {port, Port}, 
+%% Uncomment if testing behind stunnel with the "protocol = proxy" option:
+%%            {proxy_protocol, true},
+%%            {ws_force_ssl, true},
+            {port, Port},
             {loop, fun(Req) -> handle_http(Req, Port) end}, 
             {ws_loop, fun(Ws) -> handle_websocket(Ws) end}
         ]).
@@ -17,7 +20,7 @@ handle_http(Req, Port) ->
     Path = case element(2,Req:get(uri)) of "/" -> "/index.html" ; P -> P end,
     case file:read_file( "./priv" ++ Path ) of
         {ok, Bin} -> Req:ok([{"Content-Type", "text/html"}], [Bin]);
-        _         -> Req:not_found()
+        _         -> Req:respond(404)
     end.
 
 handle_websocket(Ws) ->
