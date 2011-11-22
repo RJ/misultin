@@ -2,6 +2,7 @@ ebin
 logs
 erl_crash.dump
 *.beam
+*~
 
 # -------\/------- OSX ignores
 
