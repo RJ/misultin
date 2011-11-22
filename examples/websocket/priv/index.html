@@ -24,10 +24,13 @@
                     WebSocket.__initialize();
                 }
                 var ws;
+                var protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+                var host = protocol + '://' + window.location.host;
+                var endpoint = host + '/service';
                 if ("WebSocket" in window) {
-                    ws = new WebSocket("ws://localhost:3333/service");
+                    ws = new WebSocket(endpoint);
                 } else if ("MozWebSocket" in window) {
-                    ws = new MozWebSocket("ws://localhost:3333/service");
+                    ws = new MozWebSocket(endpoint);
                 }
                 if (ws) {
                     // browser supports websockets
