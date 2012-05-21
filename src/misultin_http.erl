@@ -228,28 +228,44 @@ headers(#c{recv_timeout = RecvTimeout, ws_loop = WsLoop} = C, #req{socket = Sock
 		{SocketMode, Sock, http_eoh} ->
 			?LOG_DEBUG("received EOH header", []),
 			Headers = lists:reverse(H),
-			{_PathType, Path} = Req#req.uri,
-			% check if it's a websocket request
-			CheckWs = case WsLoop of
-				undefined -> false;
-				_Function -> misultin_websocket:check(C#c.ws_versions, Path, Headers)
-			end,
-			case CheckWs of
-				false ->
-					?LOG_DEBUG("normal http request received", []),
-					% build final req with headers, uri and args, and then send to method dispatch
-					case get_uri_and_args(Req#req{headers = Headers}) of
-						{error, HttpErrorCode} ->
-							?LOG_WARNING("error encountered when parsing uri and args: ~p", [HttpErrorCode]),
-							misultin_socket:send(Sock, build_error_message(HttpErrorCode, Req, C#c.table_date_ref, C#c.access_log), SocketMode),
-							handle_keepalive(Req#req.connection, C, Req);
-						Req0 ->
-							method_dispatch(C, Req0)
-					end;
-				{true, Vsn} ->
-					?LOG_DEBUG("websocket request received", []),
-					misultin_websocket:connect(C#c.server_ref, Req#req{headers = Headers, ws_force_ssl = C#c.ws_force_ssl}, #ws{vsn = Vsn, socket = Sock, socket_mode = SocketMode, peer_addr = Req#req.peer_addr, peer_port = Req#req.peer_port, path = Path, ws_autoexit = C#c.ws_autoexit}, WsLoop)
-			end;
+            case {Req#req.method, Req#req.uri} of
+                {"CONNECT", _} ->
+                    misultin_socket:send(Sock, 
+                        %% "Method not supported"
+                        build_error_message(405, Req#req{connection = close}, 
+                                            C#c.table_date_ref, C#c.access_log), 
+                        SocketMode),
+                    handle_keepalive(close, C, Req);
+			    {_Meth, {_PathType, Path}} ->
+                    % check if it's a websocket request
+                    CheckWs = case WsLoop of
+                        undefined -> false;
+                        _Function -> misultin_websocket:check(C#c.ws_versions, Path, Headers)
+                    end,
+                    case CheckWs of
+                        false ->
+                            ?LOG_DEBUG("normal http request received", []),
+                            % build final req with headers, uri and args, and then send to method dispatch
+                            case get_uri_and_args(Req#req{headers = Headers}) of
+                                {error, HttpErrorCode} ->
+                                    ?LOG_WARNING("error encountered when parsing uri and args: ~p", [HttpErrorCode]),
+                                    misultin_socket:send(Sock, build_error_message(HttpErrorCode, Req, C#c.table_date_ref, C#c.access_log), SocketMode),
+                                    handle_keepalive(Req#req.connection, C, Req);
+                                Req0 ->
+                                    method_dispatch(C, Req0)
+                            end;
+                        {true, Vsn} ->
+                            ?LOG_DEBUG("websocket request received", []),
+                            misultin_websocket:connect(C#c.server_ref, Req#req{headers = Headers, ws_force_ssl = C#c.ws_force_ssl}, #ws{vsn = Vsn, socket = Sock, socket_mode = SocketMode, peer_addr = Req#req.peer_addr, peer_port = Req#req.peer_port, path = Path, ws_autoexit = C#c.ws_autoexit}, WsLoop)
+                    end;
+                Else ->
+%%              io:format("404 URI: ~p // ~p ~p\n",[Else, Req#req.uri, Req]),
+                    misultin_socket:send(Sock, 
+                        build_error_message(404, Req#req{connection = close}, 
+                                            C#c.table_date_ref, C#c.access_log), 
+                        SocketMode),
+                    handle_keepalive(close, C, Req)
+            end;
 		{SocketMode, Sock, _Other} ->
 			?LOG_WARNING("tcp error treating headers: ~p, send bad request error back", [_Other]),
 			misultin_socket:send(Sock, build_error_message(400, Req, C#c.table_date_ref, C#c.access_log), SocketMode),
