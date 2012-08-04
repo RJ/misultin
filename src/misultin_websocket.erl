@@ -87,11 +87,15 @@ check_headers(Headers, RequiredHeaders) ->
 			HVal ->
 				case Val of
 					ignore -> false; % ignore value -> ok, remove from list
-					HVal -> false;	 % expected val -> ok, remove from list
+					HVal   -> false; % expected val -> ok, remove from list
 					_ ->
-						% check if header has multiple parameters (for instance FF7 websockets)
-						not(lists:member(Val,string:tokens(HVal,", ")))
-				end		
+						case string:to_lower(HVal) =:= string:to_lower(Val) of
+							true  -> false; % expected (lowercase) value, remove from list
+							false -> 
+								% check if header has multiple parameters (for instance FF7 websockets)
+								not(lists:member(Val,string:tokens(HVal,", ")))
+						end
+				end
 		end
 	end,
 	case lists:filter(F, RequiredHeaders) of
