@@ -227,8 +227,13 @@ ws_loop(WsHandleLoopPid, #ws{vsn = Vsn, socket = Socket, socket_mode = SocketMod
 		{send, Data} ->
 			VsnMod = get_module_name_from_vsn(Vsn),
 			?LOG_DEBUG("sending data: ~p to websocket module: ~p", [Data, VsnMod]),
-			misultin_socket:send(Socket, VsnMod:send_format(Data, State), SocketMode),
-			ws_loop(WsHandleLoopPid, Ws, State);
+            %% hack to prime state if still undefined (ie no data arrived before we send something)
+            NewState = case State of 
+                undefined -> VsnMod:init_state();
+                _ -> State
+            end,
+			misultin_socket:send(Socket, VsnMod:send_format(Data, NewState), SocketMode),
+			ws_loop(WsHandleLoopPid, Ws, NewState);
 		shutdown ->
 			?LOG_DEBUG("shutdown request received, closing websocket with pid ~p", [self()]),
 			% close websocket and custom controlling loop

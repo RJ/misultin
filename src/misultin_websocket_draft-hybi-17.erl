@@ -36,6 +36,7 @@
 
 % API
 -export([check_websocket/1, handshake/3, handle_data/3, send_format/2]).
+-export([init_state/0]).
 
 % macros
 -define(HYBI_COMMON, 'misultin_websocket_draft-hybi-10_17').
@@ -43,6 +44,7 @@
 % includes
 -include("../include/misultin.hrl").
 
+init_state() -> ?HYBI_COMMON:init_state().
 
 % ============================ \/ API ======================================================================
 

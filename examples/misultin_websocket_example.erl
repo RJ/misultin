@@ -63,8 +63,8 @@ handle_http(Req, Port) ->
 							// websocket is connected
 							addStatus(\"websocket connected!\");
 							// send hello data to server.
-							ws.send(\"hello server!\");
-							addStatus(\"sent message to server: 'hello server'!\");
+							ws.send(\"Hello\");
+							addStatus(\"sent message to server: 'Hello'\");
 						};
 						ws.onmessage = function (evt) {
 							var receivedMsg = evt.data;
@@ -95,6 +95,6 @@ handle_websocket(Ws) ->
 		_Ignore ->
 			handle_websocket(Ws)
 	after 5000 ->
-		Ws:send("pushing!"),
+		Ws:send("server server server server server server!!!"),
 		handle_websocket(Ws)
 	end.

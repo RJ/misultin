@@ -36,12 +36,15 @@
 
 % API
 -export([check_websocket/2, handshake/3, handle_data/3, send_format/2]).
+-export([init_state/0]).
 
 % records
 -record(state, {
 	buffer	= <<>>,
 	mask_key  = <<0,0,0,0>>,
-	fragments = [] %% if we are in the midst of receving a fragmented message, fragments are contained here in reverse order
+	fragments = [], %% if we are in the midst of receving a fragmented message, fragments are contained here in reverse order
+    z_def = undefined,
+    z_inf = undefined
 }).
 
 -record(frame, {fin,
@@ -95,9 +98,11 @@ check_websocket(Headers, RequiredHeaders) ->
 handshake(_Req, Headers, {_Path, _Origin, _Host}) ->
 	% build data
 	Key = list_to_binary(misultin_utility:header_get_value('Sec-WebSocket-Key', Headers)),
+    <<"x-webkit-deflate-frame">> = list_to_binary(misultin_utility:header_get_value('Sec-WebSocket-Extensions', Headers)),
 	Accept = base64:encode_to_string(crypto:sha(<<Key/binary, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11">>)),
 	["HTTP/1.1 101 Switching Protocols\r\n",
 		"Upgrade: websocket\r\n",
+        "Sec-WebSocket-Extensions: x-webkit-deflate-frame\r\n", %% HACK
 		"Connection: Upgrade\r\n",
 		"Sec-WebSocket-Accept: ", Accept, "\r\n\r\n"
 	].
@@ -113,30 +118,65 @@ handle_data(Data, St, Tuple) when is_list(Data) ->
 	handle_data(list_to_binary(Data), St, Tuple);
 handle_data(Data, undefined, {Socket, SocketMode, WsHandleLoopPid}) when is_binary(Data) ->
 	% init status
-	i_handle_data(#state{buffer = Data}, {Socket, SocketMode, WsHandleLoopPid});
+    State = #state{buffer=Data},
+	i_handle_data(init_zlib_contexts(State), {Socket, SocketMode, WsHandleLoopPid});
 handle_data(Data, State = #state{buffer = Buffer}, {Socket, SocketMode, WsHandleLoopPid}) when is_binary(Data) ->
 	% read status
 	i_handle_data(State#state{buffer = <<Buffer/binary, Data/binary>>}, {Socket, SocketMode, WsHandleLoopPid}).
 
+init_zlib_contexts(undefined) ->
+    init_zlib_contexts(#state{});
+init_zlib_contexts(#state{z_def=undefined}=S) ->
+    io:format("INIT ZLIB CONTEXTS\n"),
+    Zdef = zlib:open(),
+    ok = zlib:deflateInit(Zdef, best_compression, deflated, -15, 9, default),
+    Zinf = zlib:open(),
+    ok = zlib:inflateInit(Zinf, -15),
+    S#state{ z_def  = Zdef,
+             z_inf  = Zinf};
+init_zlib_contexts(#state{} = S) -> S.
+
+
+init_state() -> init_zlib_contexts(#state{}).
 % ----------------------------------------------------------------------------------------------------------
 % Function: -> binary() | iolist()
 % Description: Callback to format data before it is sent into the socket.
 % ----------------------------------------------------------------------------------------------------------
 -spec send_format(Data::iolist(), State::term()) -> binary().
+send_format(Data, undefined) ->
+    send_format(Data, init_zlib_contexts(#state{}));
+send_format(Data, S=#state{z_def=undefined}) ->
+    send_format(Data, init_zlib_contexts(S));
 send_format(Data, _State) ->
 	send_format(Data, ?OP_TEXT, _State).
-send_format(Data, OpCode, _State) ->
+send_format(Data, OpCode, #state{z_def=Zdef}) ->
 	BData = erlang:iolist_to_binary(Data),
-	Len = erlang:size(BData),
+    Deflated0 = iolist_to_binary([ zlib:deflate(Zdef, BData, full) ]),
+	Len0 = erlang:size(Deflated0),
+    LenMinus = Len0-4,
+    {Deflated,Len} = case Deflated0 of
+        <<Main:LenMinus/binary-unit:8, 0:8, 0:8, 255:8, 255:8>> -> {Main, Len0-4};
+        _ -> {Deflated0, Len0}
+    end,
+    incsent(Len),
 	if
 		Len < 126 ->
-			<<1:1, 0:3, OpCode:4, 0:1, Len:7, BData/binary>>;
+			<<1:1, 1:1, 0:2, OpCode:4, 0:1, Len:7, Deflated/binary>>;
 		Len < 65536 ->
-			<<1:1, 0:3, OpCode:4, 0:1, 126:7, Len:16, BData/binary>>;
+			<<1:1, 1:1, 0:2, OpCode:4, 0:1, 126:7, Len:16, Deflated/binary>>;
 		true ->
-			<<1:1, 0:3, OpCode:4, 0:1, 127:7, 0:1, Len:63, BData/binary>>
+			<<1:1, 1:1, 0:2, OpCode:4, 0:1, 127:7, 0:1, Len:63, Deflated/binary>>
 	end.
 % ============================ /\ API ======================================================================
+incsent(N) when is_integer(N) ->
+    case get(sentbytes) of
+        undefined ->
+            put(sentbytes, N);
+        V ->
+            New = V + N,
+            put(sentbytes, New),
+            io:format("Sent websocket bytes total: ~B\n",[New])
+    end.
 
 
 % ============================ \/ INTERNAL FUNCTIONS =======================================================
@@ -176,11 +216,6 @@ take_frame(<<Fin:1,
 			 MaskKey:4/binary,
 			 PayloadData:PayloadLen/binary-unit:8,
 			 Rest/binary>>) when PayloadLen < 126 ->
-	%% Don't auto-unmask control frames
-	Data = case ?IS_CONTROL_OPCODE(Opcode) of
-		true  -> PayloadData;
-		false -> unmask(MaskKey,PayloadData)
-	end,
 	{#frame{fin=Fin, 
 			rsv1=Rsv1,
 			rsv2=Rsv2,
@@ -189,7 +224,7 @@ take_frame(<<Fin:1,
 			maskbit=MaskBit,
 			length=PayloadLen,
 			maskkey=MaskKey,
-			data = Data}, Rest};
+			data = PayloadData}, Rest};
 % extended payload (126)
 take_frame(<<Fin:1, 
 			 Rsv1:1, %% Rsv1 = 0
@@ -210,7 +245,7 @@ take_frame(<<Fin:1,
 			maskbit=MaskBit,
 			length=PayloadLen,
 			maskkey=MaskKey,
-			data=unmask(MaskKey,PayloadData)},	Rest};
+			data=PayloadData},	Rest};
 % extended payload (127)
 take_frame(<<Fin:1, 
 			 Rsv1:1, %% Rsv1 = 0
@@ -232,7 +267,7 @@ take_frame(<<Fin:1,
 			maskbit=MaskBit,
 			length=PayloadLen,
 			maskkey=MaskKey,
-			data=unmask(MaskKey, PayloadData)},	 Rest};
+			data=PayloadData},	 Rest};
 % incomplete frame
 take_frame(Data) when is_binary(Data), size(Data) < ?MAX_UNPARSED_BUFFER_SIZE ->
 	{undefined, Data};
@@ -240,6 +275,9 @@ take_frame(Data) when is_binary(Data), size(Data) < ?MAX_UNPARSED_BUFFER_SIZE ->
 % incompatible data
 take_frame(Data) when is_binary(Data), size(Data) >= ?MAX_UNPARSED_BUFFER_SIZE ->
 	{error, max_size_reached}.
+
+maybe_unmask(#frame{opcode=OC}=F) when ?IS_CONTROL_OPCODE(OC) -> F;
+maybe_unmask(#frame{maskkey=MK, data=D}=F) -> F#frame{data=unmask(MK,D)}.
 
 % process incoming data
 -spec i_handle_data(#state{}, {Socket::socket(), SocketMode::socketmode(), WsHandleLoopPid::pid()}) -> #state{} | {websocket_close, term()}.
@@ -252,7 +290,8 @@ i_handle_data(#state{buffer=ToParse} = State, {Socket, SocketMode, WsHandleLoopP
 			?LOG_DEBUG("no frame to take, add to buffer: ~p", [Rest]),
 			%% no full frame to be had yet
 			State#state{buffer = Rest};
-		{Frame=#frame{}, Rest} ->
+		{Frame0=#frame{}, Rest} ->
+            {Frame, NewState} = maybe_inflate(maybe_unmask(Frame0), State),
 			?LOG_DEBUG("parsed frame ~p, remaining buffer is: ~p", [Frame,Rest]),
 			%% sanity check, in case client is broken
 			case sanity_check(Frame) of
@@ -273,12 +312,24 @@ i_handle_data(#state{buffer=ToParse} = State, {Socket, SocketMode, WsHandleLoopP
 			end
 	end.
 
+bin2hex(Bin) ->
+    io_lib:format("<<~s>>~n", [[io_lib:format("0x~2.16.0B ",[X]) || <<X:8>> <= Bin ]]).
+
+maybe_inflate(#frame{rsv1=0}=F, State) -> {F,State};
+maybe_inflate(#frame{data= <<>>}=F, State) -> {F,State};
+maybe_inflate(#frame{rsv1=1}=F, State) ->
+    io:format("inflate ~w bytes: ~p // ~s\n",[size(F#frame.data), F#frame.data, bin2hex(F#frame.data)]),
+    Data = iolist_to_binary(zlib:inflate(State#state.z_inf, << (F#frame.data)/binary, 0:8, 0:8, 255:8, 255:8 >>)),
+    io:format("inflated to ~w bytes: ~p\n",[size(Data), Data]),
+    NewF = F#frame{data=Data},
+    {NewF, State}.
+
 % format sanity checks
 -spec sanity_check(#frame{}) -> true | false.
 sanity_check(Frame) ->
 	Checks = [
 		{1, Frame#frame.maskbit},
-		{0, Frame#frame.rsv1},
+%%		{0, Frame#frame.rsv1},
 		{0, Frame#frame.rsv2},
 		{0, Frame#frame.rsv3}
 	],
